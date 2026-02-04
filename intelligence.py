@@ -60,9 +60,15 @@ class IntelligenceExtractor:
             self.intelligence[key] = list(set(self.intelligence[key]))
     
     def get_intelligence(self) -> Dict:
-        """Get all extracted intelligence"""
-        return {k: v for k, v in self.intelligence.items() if v}  # Only non-empty
+        """Get all extracted intelligence in the format exactly required by the callback"""
+        return {
+            'bankAccounts': self.intelligence['bankAccounts'],
+            'upiIds': self.intelligence['upiIds'],
+            'phishingLinks': self.intelligence['phishingLinks'],
+            'phoneNumbers': self.intelligence['phoneNumbers'],
+            'suspiciousKeywords': self.intelligence['suspiciousKeywords']
+        }
     
     def get_count(self) -> int:
-        """Get total items extracted"""
+        """Get total number of intelligence items extracted"""
         return sum(len(v) for v in self.intelligence.values())

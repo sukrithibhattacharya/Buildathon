@@ -4,6 +4,8 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional
 import uvicorn
 from datetime import datetime
+from fastapi.middleware.cors import CORSMiddleware
+import json
 
 from config import Config
 from scam_detector import ScamDetector
@@ -11,13 +13,11 @@ from ai_agent import AIAgent
 from session_manager import SessionManager
 from voice_detector import VoiceDetector
 
-from fastapi.middleware.cors import CORSMiddleware
-
 # Initialize FastAPI
 app = FastAPI(
     title="Impact AI Hackathon API",
     description="Solution for Scam Detection and AI Voice Detection",
-    version="2.0"
+    version="2.1"
 )
 
 # Add CORS Middleware
@@ -29,33 +29,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Custom Exception Handler for Hackathon Format
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    # This specifically catches FastAPI's 404, 405, etc.
-    detail = exc.detail
-    if isinstance(detail, dict):
-        return JSONResponse(status_code=exc.status_code, content=detail)
-    
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"status": "error", "message": str(detail)}
-    )
+# --- MODELS ---
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    return JSONResponse(
-        status_code=500,
-        content={"status": "error", "message": f"Internal Server Error: {str(exc)}"}
-    )
-
-# Initialize components
-detector = ScamDetector()
-agent = AIAgent(api_key=Config.GROQ_API_KEY, model=Config.AI_MODEL)
-session_manager = SessionManager(guvi_callback_url=Config.GUVI_CALLBACK_URL)
-voice_detector = VoiceDetector()
-
-# Request/Response Models
 class Message(BaseModel):
     sender: str
     text: str
@@ -71,7 +46,6 @@ class HoneypotResponse(BaseModel):
     status: str
     reply: str
 
-# Problem 1: Voice Detection Models
 class VoiceDetectionRequest(BaseModel):
     language: str
     audioFormat: str
@@ -84,67 +58,75 @@ class VoiceDetectionResponse(BaseModel):
     confidenceScore: float
     explanation: str
 
-# API Key Authentication
+# --- EXCEPTION HANDLERS ---
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Ensure all errors return required format if possible"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"status": "error", "message": str(exc.detail)}
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all for internal server errors"""
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "message": f"Global Error: {str(exc)}"}
+    )
+
+# --- COMPONENTS ---
+
+detector = ScamDetector()
+agent = AIAgent(api_key=Config.GROQ_API_KEY, model=Config.AI_MODEL)
+session_manager = SessionManager(guvi_callback_url=Config.GUVI_CALLBACK_URL)
+voice_detector = VoiceDetector()
+
 def verify_api_key(x_api_key: Optional[str]):
+    """Strict API key verification"""
     if not x_api_key or x_api_key != Config.API_KEY:
         raise HTTPException(
             status_code=401,
             detail="Invalid API key or malformed request"
         )
-    return x_api_key
 
 # --- PROBLEM 2: AGENTIC HONEYPOT ENDPOINTS ---
 
-@app.api_route("/", methods=["GET", "POST"], response_model=HoneypotResponse)
-@app.api_route("/honeypot", methods=["GET", "POST"], response_model=HoneypotResponse)
-async def honeypot_endpoint(
-    request: Request,
-    x_api_key: Optional[str] = Header(None)
-):
-    """
-    Robust endpoint for Honeypot API supporting both GET and POST at / and /honeypot
-    """
-    if request.method == "GET":
-        # Handle verification or health check from root
-        return HoneypotResponse(
-            status="success",
-            reply="Honeypot API is operational. Send a POST request to interact."
-        )
-
+async def handle_honeypot_logic(request: Request, x_api_key: Optional[str]):
+    """Core logic for honeypot processing"""
     # Verify API Key
     verify_api_key(x_api_key)
     
     try:
-        # Load and validate JSON body manually to ensure compatibility
+        # Load JSON body
         body = await request.json()
-        data = HoneypotRequest(**body)
+        payload = HoneypotRequest(**body)
         
-        session_id = data.sessionId
-        incoming_message = data.message.text
-        conversation_history = data.conversationHistory
+        session_id = payload.sessionId
+        incoming_message = payload.message.text
+        conversation_history = payload.conversationHistory
         
-        # Get or create session
+        # Session state management
         session = session_manager.get_or_create_session(session_id)
-        
-        # Add incoming message to session
         session_manager.add_message(
-            session_id,
-            data.message.sender,
-            incoming_message,
-            str(data.message.timestamp)
+            session_id, 
+            payload.message.sender, 
+            incoming_message, 
+            str(payload.message.timestamp)
         )
         
-        # Detect scam
+        # Scam detection
         if not session['scam_detected']:
             detection_result = detector.detect(incoming_message, conversation_history)
             if detection_result['is_scam']:
                 session['scam_detected'] = True
                 session['scam_info'] = detection_result
         
-        # Extract intelligence
+        # Intelligence extraction
         session['intelligence'].extract(incoming_message)
         
-        # Generate AI response
+        # Response generation
         if session['scam_detected']:
             reply = agent.generate_response(
                 scam_message=incoming_message,
@@ -153,9 +135,10 @@ async def honeypot_endpoint(
                 message_count=session['message_count']
             )
         else:
+            # Humanitarian/curious response or neutral fallback
             reply = "I'm not sure I understand. Can you explain more?"
         
-        # Add our reply to session
+        # Record response
         session_manager.add_message(
             session_id,
             "user",
@@ -163,38 +146,45 @@ async def honeypot_endpoint(
             datetime.utcnow().isoformat() + "Z"
         )
         
-        # Callback check
-        if session_manager.should_end_conversation(session_id, Config.MAX_MESSAGES):
-            session_manager.send_final_callback(session_id, Config.MIN_MESSAGES_FOR_INTEL)
-        
+        # Mandatory Callback Check
+        # Trigger callback if scam is detected and we have engaged enough
+        if session['scam_detected'] and session['message_count'] >= Config.MIN_MESSAGES_FOR_INTEL:
+            session_manager.send_final_callback(session_id, min_messages=0) # Logic handled here
+            
         return HoneypotResponse(status="success", reply=reply)
         
     except Exception as e:
-        print(f"Error: {e}")
-        # Return strict error format even for internal errors
-        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+        print(f"Logic Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
+# Explicitly handle POST and GET on both root and /honeypot to avoid 405
+@app.post("/", response_model=HoneypotResponse)
+@app.post("/honeypot", response_model=HoneypotResponse)
+async def post_honeypot(request: Request, x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    return await handle_honeypot_logic(request, x_api_key)
+
+@app.get("/")
+@app.get("/honeypot")
+async def get_honeypot():
+    return {
+        "status": "success", 
+        "message": "Honeypot API active. Please use POST with x-api-key."
+    }
 
 # --- PROBLEM 1: AI VOICE DETECTION ENDPOINT ---
 
 @app.post("/api/voice-detection", response_model=VoiceDetectionResponse)
 async def voice_detection_endpoint(
     request: VoiceDetectionRequest,
-    x_api_key: Optional[str] = Header(None)
+    x_api_key: Optional[str] = Header(None, alias="x-api-key")
 ):
-    """
-    Endpoint for detecting AI-generated voices
-    """
     verify_api_key(x_api_key)
-    
     result = voice_detector.detect(request.language, request.audioBase64)
-    
     if result["status"] == "error":
         raise HTTPException(status_code=400, detail=result["message"])
-        
     return VoiceDetectionResponse(**result)
 
-# --- UTILITY ENDPOINTS ---
+# --- UTILITIES ---
 
 @app.get("/health")
 async def health_check():
@@ -205,19 +195,8 @@ async def favicon():
     from fastapi.responses import Response
     return Response(status_code=204)
 
-@app.get("/")
-async def root_info():
-    return {
-        "service": "Impact AI Hackathon API",
-        "status": "operational",
-        "endpoints": {
-            "voice_detection": "/api/voice-detection (POST)",
-            "honeypot": "/honeypot (POST) or / (POST)"
-        }
-    }
+# --- STARTUP ---
 
-
-# Run server
 if __name__ == "__main__":
     uvicorn.run(
         "app:app",

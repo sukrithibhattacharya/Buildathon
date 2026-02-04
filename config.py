@@ -20,7 +20,7 @@ class Config:
     
     # Agent Settings
     MAX_MESSAGES = 25  # Maximum messages before ending
-    MIN_MESSAGES_FOR_INTEL = 5  # Minimum messages before sending callback
+    MIN_MESSAGES_FOR_INTEL = 1  # Send callback as soon as scam is confirmed
     
     # Scam Detection Thresholds
     SCAM_THRESHOLD = 0.6  # 60% confidence = scam
