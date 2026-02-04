@@ -9,25 +9,43 @@ from config import Config
 from scam_detector import ScamDetector
 from ai_agent import AIAgent
 from session_manager import SessionManager
+from voice_detector import VoiceDetector
 
 # Initialize FastAPI
 app = FastAPI(
-    title="Agentic Honeypot API",
-    description="AI-powered honeypot for scam detection and intelligence extraction",
+    title="Impact AI Hackathon API",
+    description="Solution for Scam Detection and AI Voice Detection",
     version="2.0"
 )
+
+# Custom Exception Handler for Hackathon Format
+@app.exception_handler(Exception)
+async def custom_exception_handler(request: Request, exc: Exception):
+    status_code = 500
+    message = str(exc)
+    
+    if isinstance(exc, HTTPException):
+        status_code = exc.status_code
+        if isinstance(exc.detail, dict):
+            return JSONResponse(status_code=status_code, content=exc.detail)
+        message = exc.detail
+        
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": "error", "message": message}
+    )
 
 # Initialize components
 detector = ScamDetector()
 agent = AIAgent(api_key=Config.GROQ_API_KEY, model=Config.AI_MODEL)
 session_manager = SessionManager(guvi_callback_url=Config.GUVI_CALLBACK_URL)
+voice_detector = VoiceDetector()
 
-from typing import Union
-
+# Request/Response Models
 class Message(BaseModel):
     sender: str
     text: str
-    timestamp: Union[str, int]  # Accept both string and integer
+    timestamp: int  # Changed to int for ms support
 
 class HoneypotRequest(BaseModel):
     sessionId: str
@@ -39,22 +57,40 @@ class HoneypotResponse(BaseModel):
     status: str
     reply: str
 
+# Problem 1: Voice Detection Models
+class VoiceDetectionRequest(BaseModel):
+    language: str
+    audioFormat: str
+    audioBase64: str
+
+class VoiceDetectionResponse(BaseModel):
+    status: str
+    language: str
+    classification: str
+    confidenceScore: float
+    explanation: str
+
 # API Key Authentication
-def verify_api_key(x_api_key: str = Header(...)):
+def verify_api_key(x_api_key: str):
     if x_api_key != Config.API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API Key")
+        # Return strict hackathon error format
+        raise HTTPException(
+            status_code=401,
+            detail={"status": "error", "message": "Invalid API key or malformed request"}
+        )
     return x_api_key
 
-# Main Endpoint
+# --- PROBLEM 2: AGENTIC HONEYPOT ENDPOINTS ---
+
+@app.post("/", response_model=HoneypotResponse)
 @app.post("/honeypot", response_model=HoneypotResponse)
 async def honeypot_endpoint(
     request: HoneypotRequest,
-    x_api_key: str = Header(...)
+    x_api_key: Optional[str] = Header(None)
 ):
     """
-    Main honeypot endpoint that receives scam messages and returns AI-generated responses
+    Main honeypot endpoint handling both root and /honeypot
     """
-    # Verify API Key
     verify_api_key(x_api_key)
     
     try:
@@ -70,18 +106,17 @@ async def honeypot_endpoint(
             session_id,
             request.message.sender,
             incoming_message,
-            request.message.timestamp
+            str(request.message.timestamp)
         )
         
-        # Detect scam (only on first message or if not already detected)
+        # Detect scam
         if not session['scam_detected']:
             detection_result = detector.detect(incoming_message, conversation_history)
-            
             if detection_result['is_scam']:
                 session['scam_detected'] = True
                 session['scam_info'] = detection_result
         
-        # Extract intelligence from this message
+        # Extract intelligence
         session['intelligence'].extract(incoming_message)
         
         # Generate AI response
@@ -93,7 +128,6 @@ async def honeypot_endpoint(
                 message_count=session['message_count']
             )
         else:
-            # If not scam, give neutral response
             reply = "I'm not sure I understand. Can you explain more?"
         
         # Add our reply to session
@@ -104,37 +138,52 @@ async def honeypot_endpoint(
             datetime.utcnow().isoformat() + "Z"
         )
         
-        # Check if conversation should end
+        # Callback check
         if session_manager.should_end_conversation(session_id, Config.MAX_MESSAGES):
-            # Send final callback to GUVI
             session_manager.send_final_callback(session_id, Config.MIN_MESSAGES_FOR_INTEL)
         
-        return HoneypotResponse(
-            status="success",
-            reply=reply
-        )
-    
+        return HoneypotResponse(status="success", reply=reply)
+        
     except Exception as e:
-        print(f"Error processing request: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-# Health check endpoint
+# --- PROBLEM 1: AI VOICE DETECTION ENDPOINT ---
+
+@app.post("/api/voice-detection", response_model=VoiceDetectionResponse)
+async def voice_detection_endpoint(
+    request: VoiceDetectionRequest,
+    x_api_key: Optional[str] = Header(None)
+):
+    """
+    Endpoint for detecting AI-generated voices
+    """
+    verify_api_key(x_api_key)
+    
+    result = voice_detector.detect(request.language, request.audioBase64)
+    
+    if result["status"] == "error":
+        raise HTTPException(status_code=400, detail=result["message"])
+        
+    return VoiceDetectionResponse(**result)
+
+# --- UTILITY ENDPOINTS ---
+
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "honeypot-api"}
+    return {"status": "healthy", "service": "hackathon-api"}
 
-# Root endpoint
 @app.get("/")
-async def root():
+async def root_info():
     return {
-        "service": "Agentic Honeypot API",
-        "version": "2.0",
+        "service": "Impact AI Hackathon API",
         "status": "operational",
         "endpoints": {
-            "honeypot": "/honeypot (POST)",
-            "health": "/health (GET)"
+            "voice_detection": "/api/voice-detection (POST)",
+            "honeypot": "/honeypot (POST) or / (POST)"
         }
     }
+
 
 # Run server
 if __name__ == "__main__":
