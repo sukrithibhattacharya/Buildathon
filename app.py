@@ -22,11 +22,12 @@ detector = ScamDetector()
 agent = AIAgent(api_key=Config.GROQ_API_KEY, model=Config.AI_MODEL)
 session_manager = SessionManager(guvi_callback_url=Config.GUVI_CALLBACK_URL)
 
-# Request/Response Models
+from typing import Union
+
 class Message(BaseModel):
     sender: str
     text: str
-    timestamp: str
+    timestamp: Union[str, int]  # Accept both string and integer
 
 class HoneypotRequest(BaseModel):
     sessionId: str
